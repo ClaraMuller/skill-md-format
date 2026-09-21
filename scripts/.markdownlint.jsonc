@@ -1,0 +1,8 @@
+{
+  "default": true,
+  "MD013": false,
+  "MD034": false,
+  "MD041": false,
+  "MD048": { "style": "backtick" },
+  "MD060": { "style": "aligned" }
+}

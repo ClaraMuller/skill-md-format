@@ -3,7 +3,10 @@
 or: python3 test_md_format.py
 """
 
+import shutil
+import subprocess
 import unittest
+from unittest import mock
 
 import md_format
 
@@ -48,16 +51,6 @@ class TestTextWidth(unittest.TestCase):
         self.assertFalse(any(v.kind == "line-too-long" for v in violations))
         fixed = md_format.fix([heading])
         self.assertEqual(fixed, [heading])
-
-    def test_heading_number_comma_is_still_flagged_and_fixed(self):
-        heading = "# Q1 2026: 10,000 users\n"
-        violations = md_format.check([heading])
-        self.assertTrue(
-            any(v.kind == "number-comma-separator" for v in violations)
-        )
-        fixed = md_format.fix([heading])
-        self.assertIn("10000", fixed[0])
-        self.assertNotIn(",", fixed[0])
 
     def test_code_block_is_untouched_regardless_of_width(self):
         block = [
@@ -124,57 +117,6 @@ class TestUrlAndComments(unittest.TestCase):
         self.assertTrue(all(len(l.rstrip("\n")) <= 80 for l in wrapped_lines))
 
 
-class TestNumberCommaSeparator(unittest.TestCase):
-    def test_flags_comma_separated_number_in_prose(self):
-        violations = md_format.check(["We served 10,000 requests today.\n"])
-        self.assertEqual(len(violations), 1)
-        self.assertEqual(violations[0].kind, "number-comma-separator")
-
-    def test_accepts_number_without_comma(self):
-        violations = md_format.check(["We served 10000 requests today.\n"])
-        self.assertEqual(violations, [])
-
-    def test_fix_strips_comma_from_number(self):
-        fixed = md_format.fix(["We served 10,000 requests today.\n"])
-        self.assertIn("10000", fixed[0])
-        self.assertNotIn(",", fixed[0])
-        self.assertEqual(md_format.check(fixed), [])
-
-    def test_fix_strips_comma_in_multi_group_number(self):
-        fixed = md_format.fix(["Total: 1,234,567 users.\n"])
-        self.assertIn("1234567", fixed[0])
-
-    def test_fix_strips_comma_in_list_item(self):
-        fixed = md_format.fix(["- cost is 12,000 dollars per month\n"])
-        self.assertTrue(fixed[0].startswith("-"))
-        self.assertIn("12000", fixed[0])
-        self.assertNotIn(",", fixed[0])
-
-    def test_fix_strips_comma_in_table_cell(self):
-        table = [
-            "| Metric | Value |\n",
-            "| --- | --- |\n",
-            "| Requests | 10,000 |\n",
-        ]
-        fixed = md_format.fix(table)
-        joined = "".join(fixed)
-        self.assertIn("10000", joined)
-        self.assertNotIn(",", joined)
-        self.assertEqual(md_format.check(fixed), [])
-
-    def test_number_comma_in_url_line_is_left_untouched(self):
-        line = "See https://example.com/report?count=10,000 for details.\n"
-        fixed = md_format.fix([line])
-        self.assertEqual(fixed, [line])
-        self.assertEqual(md_format.check([line]), [])
-
-    def test_does_not_touch_list_separated_by_commas(self):
-        line = "Options are a, b, and c.\n"
-        fixed = md_format.fix([line])
-        self.assertEqual(fixed[0].strip(), line.strip())
-        self.assertEqual(md_format.check([line]), [])
-
-
 class TestTable(unittest.TestCase):
     def test_flags_misaligned_table(self):
         table = [
@@ -231,6 +173,50 @@ class TestTable(unittest.TestCase):
             and sep_line.split("|")[3].strip().endswith(":")
         )
 
+    def test_flags_table_not_followed_by_blank_line(self):
+        lines = [
+            "| a | b |\n",
+            "| - | - |\n",
+            "| c | d |\n",
+            "Some prose right after, no blank line.\n",
+        ]
+        violations = md_format.check(lines)
+        self.assertTrue(
+            any(v.kind == "table-missing-blank-line-after" for v in violations)
+        )
+
+    def test_fix_inserts_blank_line_after_table(self):
+        lines = [
+            "| a | b |\n",
+            "| - | - |\n",
+            "| c | d |\n",
+            "Some prose right after, no blank line.\n",
+        ]
+        fixed = md_format.fix(lines)
+        table_end = next(
+            i for i, l in enumerate(fixed) if l.strip() == "Some prose right after, no blank line."
+        )
+        self.assertEqual(fixed[table_end - 1], "\n")
+        self.assertEqual(md_format.check(fixed), [])
+
+    def test_table_already_followed_by_blank_line_is_not_flagged(self):
+        lines = [
+            "| a | b |\n",
+            "| - | - |\n",
+            "| c | d |\n",
+            "\n",
+            "Some prose after the table.\n",
+        ]
+        self.assertEqual(md_format.check(lines), [])
+
+    def test_table_at_end_of_file_is_not_flagged(self):
+        lines = [
+            "| a | b |\n",
+            "| - | - |\n",
+            "| c | d |\n",
+        ]
+        self.assertEqual(md_format.check(lines), [])
+
 
 class TestBlockSplitting(unittest.TestCase):
     def test_table_immediately_followed_by_text_is_separated(self):
@@ -244,6 +230,80 @@ class TestBlockSplitting(unittest.TestCase):
         kinds = [k for k, _b, _s in blocks]
         self.assertIn("table", kinds)
         self.assertIn("text", kinds)
+
+
+class TestRunMarkdownlint(unittest.TestCase):
+    def test_missing_binary_reports_clear_error(self):
+        with mock.patch.object(shutil, "which", return_value=None):
+            ok, output = md_format.run_markdownlint("some.md", fix=True)
+        self.assertFalse(ok)
+        self.assertIn("markdownlint-cli not found on PATH", output)
+        self.assertIn("npm install -g markdownlint-cli", output)
+
+    def test_invokes_markdownlint_with_bundled_config_and_fix_flag(self):
+        completed = subprocess.CompletedProcess(
+            args=[], returncode=0, stdout="", stderr=""
+        )
+        with mock.patch.object(
+            shutil, "which", return_value="/usr/local/bin/markdownlint"
+        ), mock.patch.object(
+            subprocess, "run", return_value=completed
+        ) as run_mock:
+            ok, output = md_format.run_markdownlint("some.md", fix=True)
+        self.assertTrue(ok)
+        self.assertEqual(output, "")
+        called_cmd = run_mock.call_args.args[0]
+        self.assertEqual(called_cmd[0], "markdownlint")
+        self.assertIn("--config", called_cmd)
+        config_index = called_cmd.index("--config") + 1
+        self.assertEqual(
+            called_cmd[config_index], str(md_format.MARKDOWNLINT_CONFIG)
+        )
+        self.assertIn("--fix", called_cmd)
+        self.assertEqual(called_cmd[-1], "some.md")
+
+    def test_check_only_omits_fix_flag(self):
+        completed = subprocess.CompletedProcess(
+            args=[], returncode=1, stdout="some.md:1 MD009 error\n", stderr=""
+        )
+        with mock.patch.object(
+            shutil, "which", return_value="/usr/local/bin/markdownlint"
+        ), mock.patch.object(subprocess, "run", return_value=completed):
+            ok, output = md_format.run_markdownlint("some.md", fix=False)
+        self.assertFalse(ok)
+        self.assertIn("MD009", output)
+
+    def test_remaining_violation_output_is_folded_in(self):
+        completed = subprocess.CompletedProcess(
+            args=[], returncode=1, stdout="", stderr="some.md:2 MD060 error\n"
+        )
+        with mock.patch.object(
+            shutil, "which", return_value="/usr/local/bin/markdownlint"
+        ), mock.patch.object(subprocess, "run", return_value=completed):
+            ok, output = md_format.run_markdownlint("some.md", fix=False)
+        self.assertFalse(ok)
+        self.assertIn("MD060", output)
+
+
+@unittest.skipUnless(
+    shutil.which("markdownlint"), "markdownlint-cli not installed"
+)
+class TestRunMarkdownlintIntegration(unittest.TestCase):
+    def test_fix_resolves_trailing_whitespace_and_hard_tabs(self, tmp_path=None):
+        import tempfile
+        import os
+
+        fd, path = tempfile.mkstemp(suffix=".md")
+        try:
+            with os.fdopen(fd, "w") as f:
+                f.write("# Heading   \n\nSome\ttext.\n")
+            ok, _output = md_format.run_markdownlint(path, fix=True)
+            with open(path) as f:
+                contents = f.read()
+            self.assertNotIn("   \n", contents)
+            self.assertNotIn("\t", contents)
+        finally:
+            os.remove(path)
 
 
 if __name__ == "__main__":

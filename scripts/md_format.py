@@ -1,27 +1,35 @@
 #!/usr/bin/env python3
-"""Markdown formatter/linter: enforces 80-column text and aligned tables.
+"""Markdown formatter/linter: enforces 80-column text and aligned tables,
+plus markdownlint-cli's default structural rules.
 
 Usage:
     md_format.py <file> [--check-only]
 
-Default mode flags violations then rewrites the file with corrections
-applied (like a linter running with --fix). --check-only only reports
-violations and exits non-zero if any were found, without touching the file.
+Default mode runs `markdownlint --fix` first (structural rules: trailing
+whitespace, hard tabs, blank lines, heading style, pipe style, etc.), then
+flags/fixes 80-column reflow and table alignment (which markdownlint-cli
+cannot auto-fix), then re-checks both tools and reports anything that
+remains. --check-only only reports violations from both tools and exits
+non-zero if any were found, without touching the file.
 
 HTML comments (`<!-- ... -->`, single-line or block), lines containing a
 URL, and titles/headings (`#`...) are exempt from the 80-column rule and
 are never broken/wrapped.
 
-Numbers must not use a comma thousands separator (e.g. "10,000" is rewritten
-to "10000"), in prose and inside table cells alike.
+Requires `markdownlint-cli` on PATH (`npm install -g markdownlint-cli`).
 """
 
 import argparse
 import re
+import shutil
+import subprocess
 import sys
 import textwrap
+from pathlib import Path
 
 MAX_WIDTH = 80
+
+MARKDOWNLINT_CONFIG = Path(__file__).resolve().parent / ".markdownlint.jsonc"
 
 FENCE_RE = re.compile(r"^\s*(```|~~~)")
 TABLE_ROW_RE = re.compile(r"^\s*\|?.*\|.*\|?\s*$")
@@ -31,11 +39,27 @@ BLOCKQUOTE_RE = re.compile(r"^(\s*)(>+)\s?(.*)$")
 COMMENT_START_RE = re.compile(r"<!--")
 COMMENT_END_RE = re.compile(r"-->")
 URL_RE = re.compile(r"(?:https?://|ftp://|www\.)\S+", re.IGNORECASE)
-NUMBER_COMMA_RE = re.compile(r"(?<!\d)\d{1,3}(?:,\d{3})+(?:\.\d+)?(?!\d)")
 
 
-def strip_number_commas(text):
-    return NUMBER_COMMA_RE.sub(lambda m: m.group(0).replace(",", ""), text)
+def run_markdownlint(path, fix=False):
+    """Run markdownlint-cli against `path` using the bundled config.
+
+    Returns (ok, output_text). ok is True if markdownlint found no
+    remaining violations (exit code 0). output_text is combined
+    stdout/stderr, empty when clean.
+    """
+    if shutil.which("markdownlint") is None:
+        return False, (
+            "markdownlint-cli not found on PATH — install it with: "
+            "npm install -g markdownlint-cli"
+        )
+    cmd = ["markdownlint", "--config", str(MARKDOWNLINT_CONFIG)]
+    if fix:
+        cmd.append("--fix")
+    cmd.append(str(path))
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    output = (result.stdout + result.stderr).strip()
+    return result.returncode == 0, output
 
 
 class Violation:
@@ -121,14 +145,6 @@ def check_text_block(block, start_index, violations):
                     f"{len(line.rstrip(chr(10)))} columns (max {MAX_WIDTH})",
                 )
             )
-        for m in NUMBER_COMMA_RE.finditer(line):
-            violations.append(
-                Violation(
-                    start_index + offset + 1,
-                    "number-comma-separator",
-                    f"'{m.group(0)}' uses a comma thousands separator",
-                )
-            )
 
 
 def is_paragraph_break(line):
@@ -149,9 +165,7 @@ def fix_text_block(block):
     (never merged, wrapped, or broken); list items keep their marker and
     are rewrapped with a hanging indent; blockquote lines keep their `>`
     marker repeated on every wrapped line; unless the item/quote itself
-    contains a URL, in which case it too is left untouched. Comma
-    thousands separators in numbers are stripped everywhere except inside
-    URL-exempt lines.
+    contains a URL, in which case it too is left untouched.
     """
     out = []
     i = 0
@@ -159,7 +173,7 @@ def fix_text_block(block):
     while i < n:
         raw_line = block[i].rstrip("\n")
         is_url_line = bool(URL_RE.search(raw_line))
-        line = raw_line if is_url_line else strip_number_commas(raw_line)
+        line = raw_line
 
         if not line.strip() or line.lstrip().startswith("#") or is_url_line:
             out.append(line + "\n")
@@ -176,7 +190,7 @@ def fix_text_block(block):
             while i < n and block[i].strip() and not is_paragraph_break(
                 block[i]
             ):
-                para.append(strip_number_commas(block[i].strip()))
+                para.append(block[i].strip())
                 i += 1
             wrapped = textwrap.fill(
                 " ".join(para).strip(),
@@ -198,7 +212,7 @@ def fix_text_block(block):
             while i < n and block[i].strip() and not is_paragraph_break(
                 block[i]
             ):
-                para.append(strip_number_commas(block[i].strip()))
+                para.append(block[i].strip())
                 i += 1
             wrapped = textwrap.fill(
                 " ".join(para).strip(),
@@ -214,7 +228,7 @@ def fix_text_block(block):
         para = [line.strip()]
         i += 1
         while i < n and block[i].strip() and not is_paragraph_break(block[i]):
-            para.append(strip_number_commas(block[i].strip()))
+            para.append(block[i].strip())
             i += 1
         wrapped = textwrap.fill(
             " ".join(para).strip(),
@@ -308,23 +322,9 @@ def check_table_block(block, start_index, violations):
             Violation(start_index + 1, "table-not-aligned", "columns not aligned")
         )
 
-    header, _aligns, rows = parse_table(block)
-    for row in [header] + rows:
-        for cell in row:
-            for m in NUMBER_COMMA_RE.finditer(cell):
-                violations.append(
-                    Violation(
-                        start_index + 1,
-                        "number-comma-separator",
-                        f"'{m.group(0)}' uses a comma thousands separator",
-                    )
-                )
-
 
 def fix_table_block(block):
     header, aligns, rows = parse_table(block)
-    header = [strip_number_commas(c) for c in header]
-    rows = [[strip_number_commas(c) for c in row] for row in rows]
     ncols = len(header)
     widths = [0] * ncols
     for row in [header] + rows:
@@ -335,21 +335,35 @@ def fix_table_block(block):
 
 def check(lines):
     violations = []
-    for kind, block, start in split_blocks(lines):
+    blocks = split_blocks(lines)
+    for idx, (kind, block, start) in enumerate(blocks):
         if kind == "text":
             check_text_block(block, start, violations)
         elif kind == "table":
             check_table_block(block, start, violations)
+            next_block = blocks[idx + 1][1] if idx + 1 < len(blocks) else None
+            if next_block and next_block[0].strip():
+                violations.append(
+                    Violation(
+                        start + len(block) + 1,
+                        "table-missing-blank-line-after",
+                        "table must be followed by a blank line",
+                    )
+                )
     return violations
 
 
 def fix(lines):
     out = []
-    for kind, block, _start in split_blocks(lines):
+    blocks = split_blocks(lines)
+    for idx, (kind, block, _start) in enumerate(blocks):
         if kind in ("code", "comment"):
             out.extend(block)
         elif kind == "table":
             out.extend(fix_table_block(block))
+            next_block = blocks[idx + 1][1] if idx + 1 < len(blocks) else None
+            if next_block and next_block[0].strip():
+                out.append("\n")
         else:
             out.extend(fix_text_block(block))
     return out
@@ -365,33 +379,77 @@ def main():
     )
     args = parser.parse_args()
 
+    if shutil.which("markdownlint") is None:
+        print(
+            "markdownlint-cli not found on PATH — install it with: "
+            "npm install -g markdownlint-cli"
+        )
+        sys.exit(1)
+
+    if args.check_only:
+        md_ok, md_output = run_markdownlint(args.file, fix=False)
+        with open(args.file, encoding="utf-8") as f:
+            lines = f.readlines()
+        py_violations = check(lines)
+
+        if md_output:
+            print(md_output)
+        if py_violations:
+            print(f"{len(py_violations)} violation(s) found in {args.file}:")
+            for v in py_violations:
+                print(f"  {v}")
+        if md_ok and not py_violations:
+            print(f"No violations found in {args.file}")
+        sys.exit(0 if (md_ok and not py_violations) else 1)
+
+    # Python pass first: reflow, table alignment, and blank-line-after-table
+    # normalization. This must run *before* markdownlint touches the file —
+    # a table immediately followed by non-blank text (no blank line) gets
+    # misparsed by markdownlint's own table parser as an extra malformed
+    # table row (permanently flagged by MD055/MD056, never auto-fixed;
+    # MD058 never gets a chance to add the missing blank line because the
+    # line is no longer seen as text "after" the table). Python owns table
+    # structure end to end, so it must be the one to guarantee that
+    # separation exists before markdownlint ever parses the file.
     with open(args.file, encoding="utf-8") as f:
         lines = f.readlines()
 
-    violations = check(lines)
-    if violations:
-        print(f"{len(violations)} violation(s) found in {args.file}:")
-        for v in violations:
+    py_violations = check(lines)
+    if py_violations:
+        print(f"{len(py_violations)} violation(s) found in {args.file}:")
+        for v in py_violations:
             print(f"  {v}")
-    else:
-        print(f"No violations found in {args.file}")
-
-    if args.check_only:
-        sys.exit(1 if violations else 0)
-
-    if violations:
         fixed = fix(lines)
         with open(args.file, "w", encoding="utf-8") as f:
             f.writelines(fixed)
-        remaining = check(fixed)
-        if remaining:
-            print(f"{len(remaining)} violation(s) remain after fix:")
-            for v in remaining:
-                print(f"  {v}")
-            sys.exit(1)
-        print(f"Fixed and rewrote {args.file}")
+    else:
+        fixed = lines
 
-    sys.exit(0)
+    # Structural pass second: markdownlint fixes whitespace, blank lines,
+    # heading/pipe style, etc. on the now well-formed file.
+    _md_fix_ok, md_fix_output = run_markdownlint(args.file, fix=True)
+    if md_fix_output:
+        print(md_fix_output)
+
+    # Final combined check: python re-scan (reflow/table-align/blank-line)
+    # plus a markdownlint check-only pass (structural rules it couldn't
+    # fix, and MD060 verifying the alignment fix_table_block just applied).
+    with open(args.file, encoding="utf-8") as f:
+        fixed = f.readlines()
+    remaining_py = check(fixed)
+    md_ok, md_check_output = run_markdownlint(args.file, fix=False)
+
+    if md_check_output:
+        print(md_check_output)
+    if remaining_py:
+        print(f"{len(remaining_py)} violation(s) remain after fix:")
+        for v in remaining_py:
+            print(f"  {v}")
+
+    if md_ok and not remaining_py:
+        print(f"Fixed and rewrote {args.file}")
+        sys.exit(0)
+    sys.exit(1)
 
 
 if __name__ == "__main__":
