@@ -118,7 +118,7 @@ All tests must pass before the script is trusted to run unattended.
   still responsible for its own repo's git/branch rules (this skill only
   rewrites file content, it never runs git).
 - `markdownlint-cli` runs with the bundled `scripts/.markdownlint.jsonc`,
-  which disables three of its default rules and only they:
+  which disables seven of its default rules and only they:
   - `MD013` (line-length) — has zero `--fix` support for line length in
     any mode (confirmed empirically), and its default URL-exemption
     semantics don't match rule 4 above (it only exempts a line with no
@@ -128,11 +128,31 @@ All tests must pass before the script is trusted to run unattended.
     would violate rule 4's "emitted verbatim" guarantee.
   - `MD041` (first-line-h1) — this skill formats arbitrary markdown
     fragments, not only ones that open with a top-level heading.
+  - `MD033` (no-inline-html) — not fixable, and flags every `<br>` in a
+    table cell. Confluence-exported tables routinely use `<br>` for a
+    cell line break; confirmed empirically against real synced docs in
+    `md-files/` (`cache-improvements-eu.md`/`-us.md`).
+  - `MD025` (single-h1) — not fixable, and flags any document with more
+    than one top-level heading. Confluence-derived notebooks/incident
+    docs commonly have several H1 sections by design; confirmed against
+    `2026-09-02-platform-x-composition-api-incident-notebook.md`.
+  - `MD040` (fenced-code-language) — not fixable, and flags every fenced
+    code block with no language tag. Plain log/output paste blocks are
+    normal and not this skill's concern; confirmed against the same
+    incident notebook (~30 hits).
+  - `MD036` (no-emphasis-as-heading) — *is* fixable, but its fix rewrites
+    bold text into an actual heading, which is a structural/semantic
+    edit, not formatting — it conflicts with this skill's own "no
+    judgment calls" design. Confirmed against
+    `cache-next-step-decision.md`, which deliberately uses
+    `**Open questions**` as a bold label, not a heading.
   Everything else in markdownlint's default set stays on, including the
   table rules (`MD055`/`MD056`/`MD058`/`MD060`) — they don't conflict with
   `fix_table_block`, and `MD060` (configured `aligned`) is a useful
   detect-only double-check of the alignment this skill's own fixer
   applies (its own docs confirm the `aligned` style is never
-  auto-fixable, only detectable). Don't re-enable `MD013`/`MD034`/`MD041`
-  without re-deriving this reasoning first — see the `md-format`
-  rework plan history for the empirical tests behind these calls.
+  auto-fixable, only detectable). Don't re-enable any of the seven
+  without re-deriving this reasoning first — each was confirmed
+  empirically, most by running `--check-only` against this workspace's
+  own real Confluence-synced markdown files (`md-files/*.md`), not just
+  synthetic test input.
