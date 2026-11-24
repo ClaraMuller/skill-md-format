@@ -1,6 +1,8 @@
 ---
 name: md-format
-description: Formats a markdown file into a human-readable, linted style — aligns tables, wraps prose/list text to 80 columns (tables, HTML comments, titles/headings, and lines containing a URL are exempt and never broken), and applies markdownlint-cli's default structural rules (whitespace, blank lines, heading/list/code-fence style, etc.). Invoked by other skills as a formatting pass, not by a user-facing trigger phrase. This is a mechanical, deterministic pass with no judgment calls.
+description: Formats a markdown file into a human-readable, linted style — aligns tables, wraps prose/list text to 80 columns (tables, HTML comments, titles/headings, and lines containing a URL are exempt and never broken), and applies markdownlint-cli's default structural rules (whitespace, blank lines, heading/list/code-fence style, etc.). User-invoked only (`/md-format <path/to/file.md>`). This is a mechanical, deterministic pass with no judgment calls.
+disable-model-invocation: true
+argument-hint: <path/to/file.md>
 metadata:
   author: clara.muller
   model: low
@@ -12,8 +14,7 @@ Formats a markdown file so it reads well as plain text: tables get their
 columns aligned, prose/list text is wrapped to 80 columns, and
 `markdownlint-cli`'s default structural rules (trailing whitespace, hard
 tabs, blank-line spacing, heading/list-marker/code-fence style, etc.) are
-applied. This skill has no trigger phrase of its own — other skills invoke
-it as a finishing pass after they generate or edit markdown.
+applied. It runs only when the user invokes it: `/md-format <file>`.
 
 ## Requirements
 
@@ -27,8 +28,7 @@ The script fails fast with a clear error if it's missing.
 
 ## When to use
 
-- Invoked by another skill (e.g. a doc-writing or sync skill) right before
-  it finalizes a markdown file.
+- The user types `/md-format <file>` to format a markdown file.
 - **Do NOT use** on non-markdown files, or inside fenced code blocks within a
   markdown file — code blocks are left untouched by design.
 
@@ -74,7 +74,7 @@ newline, and so on.
    to report anything that remains unfixed. Pass `--check-only` to report
    without modifying the file.
 2. Relay the subagent's report (violations found, violations fixed, any
-   that couldn't be auto-fixed) back to the caller.
+   that couldn't be auto-fixed) back to the user.
 3. Verify: after the run, `python3 scripts/md_format.py <file> --check-only`
    should exit `0` with "No violations found". If it doesn't, surface the
    remaining violations — don't silently consider the pass done.
@@ -114,7 +114,7 @@ All tests must pass before the script is trusted to run unattended.
   separator row (`|---|`, with optional `:` alignment markers); anything
   else is treated as prose.
 - This is a personal skill (`~/.claude/skills/md-format`) — it is not
-  scoped to any one repo's workspace rules, but the caller invoking it is
+  scoped to any one repo's workspace rules, but the user invoking it is
   still responsible for its own repo's git/branch rules (this skill only
   rewrites file content, it never runs git).
 - `markdownlint-cli` runs with the bundled `scripts/.markdownlint.jsonc`,
